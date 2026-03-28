@@ -11,6 +11,8 @@ overleaf-paper/
 .RData
 .Rhistory
 Rplots.pdf
+*.zip
+.~lock.*
 
 # Quarto rendered outputs
 **/*_files/
@@ -25,4 +27,5 @@ analysis/exp2/game_metrics_actual_network.csv
 analysis/exp2/results_draft.md
 
 # Generated figures (reproducible from analysis scripts)
+figures/*.pdf
 figures/*.png
