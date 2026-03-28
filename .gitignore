@@ -10,3 +10,19 @@ experiment1/server/dist/index.*
 overleaf-paper/
 .RData
 .Rhistory
+Rplots.pdf
+
+# Quarto rendered outputs
+**/*_files/
+**/*_cache/
+analysis/**/*.html
+
+# Intermediate / generated data
+analysis/exp1/exp1_clean_data.csv
+analysis/exp2/exp2_clean_data.csv
+analysis/exp2/exp2_messages.csv
+analysis/exp2/game_metrics_actual_network.csv
+analysis/exp2/results_draft.md
+
+# Generated figures (reproducible from analysis scripts)
+figures/*.png

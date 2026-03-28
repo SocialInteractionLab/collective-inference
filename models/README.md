@@ -2,47 +2,59 @@
 
 This directory contains scripts for fitting and evaluating computational models of belief updating in social learning experiments.
 
-## Model Fitting
+## Scripts
 
-**`fit.py`** - Single entry point for fitting all models to Experiment 1 data.
+### `fit.py` - Model Fitting (Experiment 1)
+
+Fits two model families to Experiment 1 belief update data using transition-based fitting.
 
 ```bash
 python fit.py
 ```
 
-### Models
+**Models:**
 
-Two model families with nested variants:
+1. **DeGroot** (Slider condition)
+   - Uses partner's BELIEF (transmitted via slider)
+   - Update: `degroot = α × own_belief + (1-α) × partner_belief`
+   - Response: `belief = w_update × degroot + w_mle × own_mle + w_mid × 0.5`
+   - Parameters: α, w_update, w_mle, w_mid
 
-1. **DeGroot family** (belief averaging)
-   - DeGroot: 1 parameter (α = self-weight)
-   - DeGroot + Anchoring: 2 parameters (α, β = anchor to own MLE)
+2. **Count** (Chat condition)
+   - Uses partner's COUNTS (transmitted via chat)
+   - Update: `pooled_mle = (own_r + δ×cum_r) / (own_n + δ×cum_n)`
+   - Inertia: `count_step = γ × own_belief + (1-γ) × pooled_mle`
+   - Response: `belief = w_update × count_step + w_mle × own_mle + w_mid × 0.5`
+   - Parameters: δ, γ, w_update, w_mle, w_mid
 
-2. **Count family** (evidence pooling)
-   - Count: 2 parameters (δ = evidence discount, γ = inertia)
-   - Count + Relative Anchoring: 3 parameters (δ, γ, β_scale)
+**Output:** `fit_results.csv` with all parameters, AIC, MSE, and σ (derived from √MSE)
 
-The key theoretical distinction:
-- **DeGroot** uses partner's *belief* (available in slider condition)
-- **Count** uses partner's *counts* (available in chat condition)
+### `predict.py` - Model Predictions (Experiment 2)
 
-### Fitting Approach
+Uses fitted parameters to simulate Experiment 2 and generate predictions across difficulty axes.
 
-**Transition-based**: Fits round-to-round belief transitions, directly testing each model's update rule.
+```bash
+python predict.py
+```
 
-### Key Results (Experiment 1)
+**Output:** `figures/model_fig5.pdf` - Predicted error across difficulty axes (compare to `figures/fig5.pdf` for human data)
+
+## Key Results
+
+### Experiment 1: Model Comparison (AIC)
 
 | Model | Slider | Chat | k |
 |-------|--------|------|---|
 | DeGroot | -2713 | -2574 | 1 |
-| DeGroot + Anchoring | **-2804** | -2769 | 2 |
+| DeGroot + Response | **-2801** | -2795 | 4 |
 | Count | -2511 | -2901 | 2 |
-| Count + Relative Anchoring | -2519 | **-2910** | 3 |
+| Count + Response | -2541 | **-2917** | 5 |
 
-**Crossover confirmed**: DeGroot wins slider (+284 ΔAIC), Count wins chat (-141 ΔAIC)
+**Crossover confirmed:** DeGroot fits slider better, Count fits chat better.
 
-## Other Files
+### Experiment 2: Predictions
 
-- **`simulate_exp2_predictions.py`** - Generate model predictions for Experiment 2
-- **`make_model_fig5.py`** - Create model predictions figure
-- **`plot_models.py`** - Visualization utilities
+The models correctly predict:
+- Chat condition has lower error than Slider (Count pools evidence efficiently)
+- Representativeness has largest effect (both conditions)
+- Distribution evenness reduces error (both conditions)

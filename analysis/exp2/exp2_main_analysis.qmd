@@ -2,6 +2,8 @@
 title: "Experiment 2: Main Analysis"
 format: html
 editor: visual
+execute:
+  cache: false
 ---
 
 ## Overview
@@ -38,7 +40,7 @@ library(tidyboot)
 theme_set(theme_few())
 
 # Colors for conditions
-condition_colors <- c("slider" = "#E69F00", "interactive" = "#0072B2")
+condition_colors <- c("slider" = "#E69F00", "interactive" = "#009E73")  # Match Exp 1 palette
 ```
 
 ## Load Data
@@ -47,14 +49,28 @@ condition_colors <- c("slider" = "#E69F00", "interactive" = "#0072B2")
 #| label: load-data
 #| message: false
 
-# Load full data (intent-to-treat, no exclusions)
-d.all <- read_csv(here('analysis/exp2/exp2_clean_data_jan17.csv'))
+# Load clean data (produced by 1_data_cleaning.qmd)
+d.all <- read_csv(here('analysis/exp2/exp2_clean_data.csv'))
 
-# Create condition variable
+# Derive condition and direction from treatmentName
 d.all <- d.all %>%
-  mutate(condition = ifelse(str_detect(treatmentName.x, "interactive"), "interactive", "slider"))
+  mutate(
+    condition = ifelse(str_detect(treatmentName.x, "interactive"), "interactive", "slider"),
+    direction = ifelse(str_detect(treatmentName.x, "^RS_"), "RS", "SR")
+  )
 
-cat("=== DATA SUMMARY (Intent-to-Treat) ===\n")
+# Shift slider index so round 1 = first round with social information
+# In slider condition, round 1 is the initial guess BEFORE seeing others' numbers
+# In chat condition, round 1 already includes discussion
+# This aligns the conditions for fair comparison
+
+# Create shifted index (baseline will be saved AFTER error is computed below)
+d.all <- d.all %>%
+  mutate(
+    idx_shifted = if_else(condition == "slider", idx - 1, idx)
+  )
+
+cat("=== DATA SUMMARY (Intent-to-Treat, with index shift) ===\n")
 cat("Participants:", n_distinct(d.all$playerID), "\n")
 cat("Games:", n_distinct(d.all$gameID), "\n")
 cat("Observations:", nrow(d.all), "\n")
@@ -108,16 +124,34 @@ entropy_actual <- active_players %>%
     .groups = "drop"
   )
 
-# Representativeness: deviation from 50%
+# Representativeness: use the existing column from the data
+# This is mean |individual_MLE - collective_MLE|, measuring how misleading individual samples are
+# (NOT |mle - 0.5| which measures distance from 50%)
 game_metrics_actual <- game_metrics_actual %>%
   left_join(entropy_actual, by = "gameID") %>%
-  mutate(representation_actual = abs(mleGame_actual - 0.5))
+  left_join(
+    d.all %>% distinct(gameID, representation) %>% rename(representation_actual = representation),
+    by = "gameID"
+  )
 
 # Merge back to all participants
 d.all <- d.all %>%
   left_join(game_metrics_actual, by = "gameID")
 
+# CRITICAL: Align MLE for direction
+# In RS direction games, the majority was squirrels, but participants still report % rabbits
+# So the "true" network MLE needs to be inverted for RS games
+d.all <- d.all %>%
+  mutate(
+    mleGame_aligned = ifelse(direction == "RS", 1 - mleGame_actual, mleGame_actual)
+  )
+
 cat("\nActual network metrics computed for", n_distinct(game_metrics_actual$gameID), "games\n")
+cat("Direction distribution:\n")
+d.all %>%
+  distinct(gameID, direction) %>%
+  count(direction) %>%
+  print()
 ```
 
 ## Compute Error
@@ -125,9 +159,18 @@ cat("\nActual network metrics computed for", n_distinct(game_metrics_actual$game
 ```{r}
 #| label: compute-error
 
-# Compute absolute error from ACTUAL network MLE
+# Compute absolute error from ALIGNED network MLE
+# This accounts for direction (RS games have inverted MLE)
 d.all <- d.all %>%
-  mutate(error = abs(guess - mleGame_actual * 100))
+  mutate(error = abs(guess - mleGame_aligned * 100))
+
+# Now save slider's baseline (pre-social, idx_shifted=0) for visualization
+d.slider_baseline <- d.all %>%
+  filter(condition == "slider", idx_shifted == 0)
+
+# Filter to only include rounds with social information (idx_shifted >= 1)
+d.all <- d.all %>%
+  filter(idx_shifted >= 1)
 
 cat("Error summary:\n")
 summary(d.all$error)
@@ -181,6 +224,13 @@ d.all %>%
   count(difficulty_profile) %>%
   arrange(desc(n)) %>%
   print()
+
+# Add difficulty bins to slider baseline data (for plotting)
+d.slider_baseline <- d.slider_baseline %>%
+  left_join(
+    d.all %>% distinct(gameID, n_hard, critters_bin, entropy_bin, rep_bin),
+    by = "gameID"
+  )
 ```
 
 ---
@@ -189,6 +239,55 @@ d.all %>%
 
 **Key question:** Do groups improve over time? Does chat outperform slider?
 
+## 1.0 Create Effect-Coded Variables
+
+```{r}
+#| label: effect-coding
+
+# Effect coding for all analyses
+# Condition: -0.5 = chat, +0.5 = slider
+# Difficulty: scaled 0-1 and mean-centered (continuous predictors)
+
+# First, verify the difficulty dimensions are continuous (not factorial design)
+cat("=== DIFFICULTY DIMENSION DISTRIBUTIONS ===\n")
+game_difficulty <- d.all %>%
+  distinct(gameID, nCrittersGame_actual, entropy_actual, representation_actual)
+cat("Sample size: ", n_distinct(game_difficulty$nCrittersGame_actual), "unique values\n")
+cat("Entropy: ", n_distinct(round(game_difficulty$entropy_actual, 3)), "unique values\n")
+cat("Representativeness: ", n_distinct(round(game_difficulty$representation_actual, 3)), "unique values\n")
+cat("Total unique combinations:", nrow(game_difficulty), "(vs 8 expected for 2×2×2 factorial)\n\n")
+cat("Since difficulty dimensions are CONTINUOUS, we use centered continuous predictors.\n\n")
+
+d.all <- d.all %>%
+  mutate(
+    # Effect-coded condition
+    condition_c = ifelse(condition == "slider", 0.5, -0.5),
+    idx_c = idx_shifted - mean(idx_shifted, na.rm = TRUE),
+
+    # Scale difficulty to 0-1 range, then mean-center
+    # Higher values = MORE DIFFICULT for all three
+    critters_scaled = 1 - (nCrittersGame_actual - min(nCrittersGame_actual, na.rm = TRUE)) /
+                          (max(nCrittersGame_actual, na.rm = TRUE) - min(nCrittersGame_actual, na.rm = TRUE)),  # Fewer = harder
+    entropy_scaled = 1 - (entropy_actual - min(entropy_actual, na.rm = TRUE)) /
+                         (max(entropy_actual, na.rm = TRUE) - min(entropy_actual, na.rm = TRUE)),  # Lower entropy = harder
+    rep_scaled = (representation_actual - min(representation_actual, na.rm = TRUE)) /
+                 (max(representation_actual, na.rm = TRUE) - min(representation_actual, na.rm = TRUE)),  # Higher = harder (less representative)
+
+    # Mean-center
+    critters_c = critters_scaled - mean(critters_scaled, na.rm = TRUE),
+    entropy_c = entropy_scaled - mean(entropy_scaled, na.rm = TRUE),
+    rep_c = rep_scaled - mean(rep_scaled, na.rm = TRUE)
+  )
+
+cat("Effect coding applied:\n")
+cat("  condition_c: chat = -0.5, slider = +0.5\n")
+cat("  idx_c: centered at mean round\n")
+cat("  difficulty: scaled 0-1 (higher = harder), then mean-centered\n")
+cat("    critters_c range:", round(min(d.all$critters_c), 3), "to", round(max(d.all$critters_c), 3), "\n")
+cat("    entropy_c range:", round(min(d.all$entropy_c), 3), "to", round(max(d.all$entropy_c), 3), "\n")
+cat("    rep_c range:", round(min(d.all$rep_c), 3), "to", round(max(d.all$rep_c), 3), "\n")
+```
+
 ## 1.1 Basic Model: Error ~ Round
 
 ```{r}
@@ -196,37 +295,62 @@ d.all %>%
 
 # Linear mixed-effects model: error decreases over time
 model1_basic <- lmer(
-  error ~ idx + (1 + idx | gameID/playerID),
+  error ~ idx_c + (1 + idx_c | gameID/playerID),
   data = d.all
 )
 
-cat("=== Model 1: Error ~ Round ===\n")
+cat("=== Model 1: Error ~ Round (centered) ===\n")
 summary(model1_basic)
-
-# Extract key coefficient
-coef_round <- fixef(model1_basic)["idx"]
-ci_round <- confint(model1_basic, parm = "idx", method = "Wald")
-cat("\nRound effect: b =", round(coef_round, 3),
-    ", 95% CI [", round(ci_round[1], 3), ",", round(ci_round[2], 3), "]\n")
 ```
 
-## 1.2 Condition Effect: Error ~ Round × Condition
+## 1.2 Condition Effect: Error ~ Round × Condition (Effect-Coded)
 
 ```{r}
 #| label: analysis1-condition
 
-# Model with condition
+# Model with effect-coded condition
 model1_condition <- lmer(
-  error ~ idx * condition + (1 + idx | gameID/playerID),
+  error ~ condition_c * idx_c + (1 + idx_c | gameID/playerID),
   data = d.all
 )
 
-cat("=== Model 2: Error ~ Round × Condition ===\n")
+cat("=== Model 2: Error ~ Round × Condition (effect-coded) ===\n")
 summary(model1_condition)
 
-# Model comparison
-cat("\n=== Model Comparison ===\n")
-anova(model1_basic, model1_condition)
+# Extract key statistics for manuscript
+cat("\n=== KEY STATISTICS FOR MANUSCRIPT ===\n")
+coefs <- fixef(model1_condition)
+se <- sqrt(diag(vcov(model1_condition)))
+df <- summary(model1_condition)$coefficients[, "df"]
+pvals <- summary(model1_condition)$coefficients[, "Pr(>|t|)"]
+
+cat("Round effect: b =", round(coefs["idx_c"], 2),
+    ", SE =", round(se["idx_c"], 2),
+    ", p <", ifelse(pvals["idx_c"] < 0.001, ".001", round(pvals["idx_c"], 3)), "\n")
+cat("Condition effect: b =", round(coefs["condition_c"], 2),
+    ", SE =", round(se["condition_c"], 2),
+    ", p =", round(pvals["condition_c"], 4), "\n")
+cat("Interaction: b =", round(coefs["condition_c:idx_c"], 2),
+    ", SE =", round(se["condition_c:idx_c"], 2),
+    ", p =", round(pvals["condition_c:idx_c"], 3), "\n")
+
+# Condition means
+cat("\nCondition means:\n")
+d.all %>%
+  group_by(condition) %>%
+  summarise(mean_error = round(mean(error, na.rm = TRUE), 1),
+            sd_error = round(sd(error, na.rm = TRUE), 1),
+            n = n()) %>%
+  print()
+
+# Final round means
+cat("\nFinal round means:\n")
+d.all %>%
+  group_by(condition) %>%
+  filter(idx_shifted == max(idx_shifted, na.rm = TRUE)) %>%
+  summarise(final_error = round(mean(error, na.rm = TRUE), 1),
+            n = n()) %>%
+  print()
 ```
 
 ## 1.3 Figure 5A: Error Over Time by Condition
@@ -239,10 +363,10 @@ anova(model1_basic, model1_condition)
 # Compute bootstrapped means
 error_by_round <- d.all %>%
   filter(!is.na(error)) %>%
-  group_by(condition, idx) %>%
+  group_by(condition, idx_shifted) %>%
   tidyboot_mean(error, na.rm = TRUE)
 
-fig5a <- ggplot(error_by_round, aes(x = idx, y = empirical_stat, color = condition)) +
+fig5a <- ggplot(error_by_round, aes(x = idx_shifted, y = empirical_stat, color = condition)) +
   geom_line(linewidth = 1) +
   geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = condition),
               alpha = 0.2, color = NA) +
@@ -270,9 +394,11 @@ fig5a
 #| fig-width: 6
 #| fig-height: 5
 
-# Final round only
+# Final round only (each condition's max shifted index)
 d.final <- d.all %>%
-  filter(idx == max(idx, na.rm = TRUE))
+  group_by(condition) %>%
+  filter(idx_shifted == max(idx_shifted, na.rm = TRUE)) %>%
+  ungroup()
 
 fig5b <- ggplot(d.final, aes(x = condition, y = error, fill = condition)) +
   geom_violin(alpha = 0.7) +
@@ -416,82 +542,138 @@ fig6a
 
 ---
 
-# Analysis 3: Continuous Difficulty Predictors
+# Analysis 3: Difficulty × Condition Interactions (Centered Continuous)
 
 **Key question:** Which difficulty dimension most strongly moderates chat's advantage?
 
-## 3.1 Min-Max Scale Predictors
+**Modeling approach:** We use centered continuous predictors for difficulty (scaled 0-1, then mean-centered) so that:
+- Main effects are interpretable at the average level of all other predictors
+- Coefficients represent the change in error per unit change in difficulty (full 0-1 range)
+- Interaction coefficients show how much the condition effect changes across the full range of difficulty
 
-Using the **actual network metrics** for scaling:
+## 3.0 Correlation Between Difficulty Dimensions
 
 ```{r}
-#| label: analysis3-scale
+#| label: difficulty-correlations
 
-# Min-max scale continuous predictors (using actual network metrics)
-d.all <- d.all %>%
-  mutate(
-    critters_scaled = (nCrittersGame_actual - min(nCrittersGame_actual, na.rm = TRUE)) /
-                      (max(nCrittersGame_actual, na.rm = TRUE) - min(nCrittersGame_actual, na.rm = TRUE)),
-    entropy_scaled = (entropy_actual - min(entropy_actual, na.rm = TRUE)) /
-                     (max(entropy_actual, na.rm = TRUE) - min(entropy_actual, na.rm = TRUE)),
-    rep_scaled = (representation_actual - min(representation_actual, na.rm = TRUE)) /
-                 (max(representation_actual, na.rm = TRUE) - min(representation_actual, na.rm = TRUE))
-  )
+# Correlation between entropy and representativeness (reported in manuscript)
+game_level <- d.all %>%
+  distinct(gameID, entropy_actual, representation_actual)
 
-cat("Scaled predictor ranges:\n")
-cat("Critters:", range(d.all$critters_scaled, na.rm = TRUE), "\n")
-cat("Entropy:", range(d.all$entropy_scaled, na.rm = TRUE), "\n")
-cat("Representativeness:", range(d.all$rep_scaled, na.rm = TRUE), "\n")
+r_entropy_rep <- cor(game_level$entropy_actual, game_level$representation_actual,
+                     use = "complete.obs")
+cat("Correlation between entropy and representativeness: r =", round(r_entropy_rep, 2), "\n")
 ```
 
-## 3.2 Full Interaction Model
+## 3.1 Full Factorial Model
+
+Testing all main effects and interactions between condition and difficulty dimensions:
 
 ```{r}
-#| label: analysis3-full
+#| label: analysis3-full-factorial
 
-# Full model with all interactions
+# Full factorial model with effect-coded predictors
+# Include round index to control for learning over time
+# All two-way interactions between condition and difficulty dimensions
+# Plus difficulty × difficulty interactions
 model3_full <- lmer(
-  error ~ condition * critters_scaled * entropy_scaled * rep_scaled +
-    (1 | gameID),
-  data = d.all
-)
-
-cat("=== Full Interaction Model ===\n")
-summary(model3_full)
-```
-
-## 3.3 Extract Key Interactions
-
-```{r}
-#| label: analysis3-interactions
-
-# Simpler model focusing on two-way interactions with condition
-model3_simple <- lmer(
-  error ~ condition * critters_scaled +
-          condition * entropy_scaled +
-          condition * rep_scaled +
+  error ~ idx_c +
+          condition_c * critters_c +
+          condition_c * entropy_c +
+          condition_c * rep_c +
+          critters_c * entropy_c +
+          critters_c * rep_c +
+          entropy_c * rep_c +
     (1 | gameID/playerID),
   data = d.all
 )
 
-cat("=== Two-Way Interactions with Condition ===\n")
-summary(model3_simple)
+cat("=== Full Factorial Model (Effect-Coded) ===\n")
+cat("Coding: -0.5 = easy/chat, +0.5 = hard/slider\n\n")
+summary(model3_full)
+```
 
-# Extract coefficients for figure
-coef_table <- tidy(model3_simple, effects = "fixed", conf.int = TRUE) %>%
-  filter(str_detect(term, ":")) %>%
+## 3.2 Extract Key Statistics
+
+```{r}
+#| label: analysis3-key-stats
+
+coefs <- summary(model3_full)$coefficients
+
+# Helper function to format statistics
+format_stat <- function(coefs, term) {
+  b <- coefs[term, "Estimate"]
+  t_val <- coefs[term, "t value"]
+  df <- coefs[term, "df"]
+  p <- coefs[term, "Pr(>|t|)"]
+  sig <- ifelse(p < 0.001, "***", ifelse(p < 0.01, "**", ifelse(p < 0.05, "*", "")))
+  p_str <- ifelse(p < 0.001, "< .001", sprintf("= %.3f", p))
+  sprintf("b = %5.2f, t(%3.0f) = %5.2f, p %s %s", b, df, t_val, p_str, sig)
+}
+
+cat("=== MAIN EFFECTS ===\n")
+cat("(Averaging across all other factors)\n\n")
+cat("  Round (centered):   ", format_stat(coefs, "idx_c"), "\n")
+cat("  Condition:          ", format_stat(coefs, "condition_c"), "\n")
+cat("  Sample size:        ", format_stat(coefs, "critters_c"), "\n")
+cat("  Entropy:            ", format_stat(coefs, "entropy_c"), "\n")
+cat("  Representativeness: ", format_stat(coefs, "rep_c"), "\n")
+
+cat("\n=== CONDITION × DIFFICULTY INTERACTIONS ===\n")
+cat("(Does slider's disadvantage change with difficulty?)\n\n")
+cat("  Cond × Sample size: ", format_stat(coefs, "condition_c:critters_c"), "\n")
+cat("  Cond × Entropy:     ", format_stat(coefs, "condition_c:entropy_c"), "\n")
+cat("  Cond × Rep:         ", format_stat(coefs, "condition_c:rep_c"), "\n")
+
+cat("\n=== DIFFICULTY × DIFFICULTY INTERACTIONS ===\n")
+cat("(Do sources of difficulty compound?)\n\n")
+cat("  Sample × Entropy:   ", format_stat(coefs, "critters_c:entropy_c"), "\n")
+cat("  Sample × Rep:       ", format_stat(coefs, "critters_c:rep_c"), "\n")
+cat("  Entropy × Rep:      ", format_stat(coefs, "entropy_c:rep_c"), "\n")
+
+# Store for later use
+model3_interactions <- model3_full
+```
+
+## 3.3 Cell Means for Representativeness × Condition
+
+```{r}
+#| label: analysis3-cell-means
+
+cat("=== CELL MEANS: Representativeness × Condition ===\n\n")
+d.all %>%
+  filter(!is.na(error)) %>%
+  group_by(rep_bin, condition) %>%
+  summarise(
+    mean_error = round(mean(error, na.rm = TRUE), 1),
+    sd_error = round(sd(error, na.rm = TRUE), 1),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  print()
+```
+
+## 3.4 Create Coefficient Table for Manuscript
+
+```{r}
+#| label: analysis3-coef-table
+
+# Extract interaction coefficients for figure
+coef_table <- tidy(model3_full, effects = "fixed", conf.int = TRUE) %>%
+  filter(str_detect(term, "condition_c:") & !str_detect(term, ":.*:")) %>%
   mutate(
     dimension = case_when(
       str_detect(term, "critters") ~ "Sample Size",
-      str_detect(term, "entropy") ~ "Entropy",
+      str_detect(term, "entropy") ~ "Distribution",
       str_detect(term, "rep") ~ "Representativeness"
     )
   )
 
-print(coef_table)
+cat("Interaction coefficients for figure:\n")
+print(coef_table %>% select(dimension, estimate, conf.low, conf.high, p.value))
 ```
 
-## 3.4 Figure 6B: Interaction Coefficients
+## 3.5 Figure 6B: Interaction Coefficients
 
 ```{r}
 #| label: fig6b
@@ -520,6 +702,19 @@ fig6b
 
 **Key question:** What aspects of chat communication predict accuracy?
 
+**Coding procedure:** Two coders independently categorized each message along two dimensions:
+
+- **Source**: Personal (own observation) vs. Social (relaying information from others)
+- **Type**: Numeric (specific counts) vs. Belief (estimates/opinions)
+
+This yields four main categories:
+- `pn` = personal numeric (e.g., "I saw 3 rabbits and 2 squirrels")
+- `pb` = personal belief (e.g., "I think it's around 70%")
+- `sn` = social numeric (e.g., "My partner said they saw 5 rabbits")
+- `sb` = social belief (e.g., "They thought it was 60%")
+
+Messages could receive compound codes if they contained multiple types (e.g., "pnsb" = personal numeric + social belief).
+
 ## 4.1 Load Coded Messages
 
 ```{r}
@@ -533,12 +728,13 @@ cat("=== MESSAGE DATA ===\n")
 cat("Total messages:", nrow(d.messages), "\n")
 cat("Unique games:", n_distinct(d.messages$gameID), "\n")
 
-# Coding categories
+# Coding categories (including compound codes)
 cat("\nCoding categories:\n")
 d.messages %>%
   count(coding) %>%
   mutate(pct = round(n / sum(n) * 100, 1)) %>%
-  print()
+  arrange(desc(n)) %>%
+  print(n = 15)
 ```
 
 ## 4.2 Aggregate Message Counts per Game
@@ -547,26 +743,31 @@ d.messages %>%
 #| label: message-counts
 
 # Count message types per game
+# Use str_detect to capture compound codes (e.g., "pnsb" contains both pn and sb)
 message_counts <- d.messages %>%
   group_by(gameID) %>%
   summarise(
     total_messages = n(),
-    pn_count = sum(coding == "pn", na.rm = TRUE),  # personal numeric
-    pb_count = sum(coding == "pb", na.rm = TRUE),  # personal belief
-    sn_count = sum(coding == "sn", na.rm = TRUE),  # social numeric
-    sb_count = sum(coding == "sb", na.rm = TRUE),  # social belief
-    o_count = sum(coding == "o", na.rm = TRUE),    # other
-    q_count = sum(coding == "q", na.rm = TRUE),    # question
+    pn_count = sum(str_detect(coding, "pn"), na.rm = TRUE),  # personal numeric
+    pb_count = sum(str_detect(coding, "pb"), na.rm = TRUE),  # personal belief
+    sn_count = sum(str_detect(coding, "sn"), na.rm = TRUE),  # social numeric
+    sb_count = sum(str_detect(coding, "sb"), na.rm = TRUE),  # social belief
+    o_count = sum(coding == "o", na.rm = TRUE),              # other (exact match)
+    q_count = sum(str_detect(coding, "q"), na.rm = TRUE),    # question
     .groups = "drop"
   ) %>%
   mutate(
-    # Proportions
+    # Proportions of messages containing each type
     p_social = (sn_count + sb_count) / total_messages,
     p_personal = (pn_count + pb_count) / total_messages
   )
 
 cat("Message count summary:\n")
 summary(message_counts %>% select(total_messages, pn_count:q_count))
+
+cat("\nProportion social information:\n")
+cat("Mean:", round(mean(message_counts$p_social), 3), "\n")
+cat("Range:", round(range(message_counts$p_social), 3), "\n")
 ```
 
 ## 4.3 Merge with Game-Level Error
@@ -574,9 +775,10 @@ summary(message_counts %>% select(total_messages, pn_count:q_count))
 ```{r}
 #| label: merge-messages
 
-# Compute final-round error per game
+# Compute final-round error per game (using shifted index)
 game_error <- d.all %>%
-  filter(idx == max(idx, na.rm = TRUE)) %>%
+  group_by(gameID, condition) %>%
+  filter(idx_shifted == max(idx_shifted, na.rm = TRUE)) %>%
   group_by(gameID) %>%
   summarise(
     avg_error = mean(error, na.rm = TRUE),
@@ -592,25 +794,35 @@ cat("Games with both message and error data:", nrow(d.message_analysis), "\n")
 
 ## 4.4 Social Information Predicts Accuracy
 
+**Model specification:** We predict log-transformed final error from the proportion of messages containing social information, controlling for personal information sharing. Log transformation accounts for the right-skewed error distribution.
+
 ```{r}
 #| label: analysis4-social
 
-# Model: Final error ~ proportion social information
+# Primary model: proportion of social information predicts accuracy
+# Outcome: log(avg_error + 1) to handle skew
+# Predictors: p_social (proportion social), p_personal (proportion personal)
 model4_social <- lm(
   log(avg_error + 1) ~ p_social + p_personal,
   data = d.message_analysis
 )
 
-cat("=== Model: Social Information → Error ===\n")
+cat("=== Primary Model: Proportion Social Information → log(Error) ===\n")
 summary(model4_social)
 
-# By message type
+cat("\n=== Key Result for Manuscript ===\n")
+coef_social <- coef(summary(model4_social))["p_social", ]
+cat("p_social coefficient: b =", round(coef_social["Estimate"], 2),
+    ", p =", format.pval(coef_social["Pr(>|t|)"], digits = 3), "\n")
+cat("Interpretation: Higher proportion of social information → lower log(error)\n")
+
+# Secondary model: raw counts by message type
 model4_types <- lm(
   log(avg_error + 1) ~ pn_count + pb_count + sn_count + sb_count,
   data = d.message_analysis
 )
 
-cat("\n=== Model: Message Types → Error ===\n")
+cat("\n=== Secondary Model: Message Counts → log(Error) ===\n")
 summary(model4_types)
 ```
 
@@ -682,86 +894,131 @@ This is the main "money plot" combining error over time with the three difficult
 
 ```{r}
 #| label: save-fig5
+#| cache: false
 #| fig-width: 12
 #| fig-height: 3.5
 
-# Panel A: Error over time (bootstrapped CIs)
+# Panel A: Error over time COLLAPSED (bootstrapped CIs)
 error_by_round <- d.all %>%
   filter(!is.na(error)) %>%
-  group_by(condition, idx) %>%
+  group_by(condition, idx_shifted) %>%
   tidyboot_mean(error, na.rm = TRUE)
 
-fig5_a <- ggplot(error_by_round, aes(x = idx, y = empirical_stat, color = condition)) +
-  geom_line(linewidth = 1) +
+# Compute slider baseline (pre-social, collapsed)
+slider_baseline_collapsed <- d.slider_baseline %>%
+  filter(!is.na(error)) %>%
+  tidyboot_mean(error, na.rm = TRUE) %>%
+  mutate(condition = "slider", idx_shifted = 0)
+
+# Get first points for each condition for dashed lines
+first_points <- error_by_round %>%
+  filter(idx_shifted == 1) %>%
+  select(condition, empirical_stat)
+
+# Create baseline segments for BOTH conditions (connecting baseline to round 1)
+baseline_segments <- first_points %>%
+  mutate(
+    baseline_y = slider_baseline_collapsed$empirical_stat,
+    x_start = 0,
+    x_end = 1
+  )
+
+fig5_a <- ggplot(error_by_round,
+                 aes(x = idx_shifted, y = empirical_stat, color = condition)) +
+  # Add dashed lines from baseline to first social-info round (both conditions)
+  geom_segment(data = baseline_segments,
+               aes(x = x_start, xend = x_end, y = baseline_y, yend = empirical_stat, color = condition),
+               linetype = "dashed", linewidth = 0.8) +
+  # Add baseline point (slider only)
+  geom_point(data = slider_baseline_collapsed,
+             aes(x = idx_shifted, y = empirical_stat),
+             size = 2, color = condition_colors["slider"]) +
+  # Main plot elements - connect points with lines (no smoothing)
   geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = condition),
-              alpha = 0.2, color = NA) +
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
   geom_point(size = 2) +
   scale_color_manual(values = condition_colors,
                      labels = c("interactive" = "Chat", "slider" = "Slider"),
-                     name = "Condition") +
+                     name = NULL) +
   scale_fill_manual(values = condition_colors,
                     labels = c("interactive" = "Chat", "slider" = "Slider"),
-                    name = "Condition") +
+                    name = NULL) +
   labs(x = "Round", y = "Mean Absolute Error", tag = "A") +
-  theme(legend.position = "none") +
-  coord_cartesian(ylim = c(24, 40))
+  theme_few() +
+  theme(legend.position = c(0.75, 0.85),
+        legend.background = element_blank(),
+        legend.key.size = unit(0.4, "cm"),
+        aspect.ratio = 1)
 
-# Panel B: Sample Size (bootstrapped CIs)
-summary_critters <- d.all %>%
-  filter(!is.na(error)) %>%
-  group_by(critters_bin, condition) %>%
-  tidyboot_mean(error, na.rm = TRUE)
+fig5_a
 
-fig5_b <- ggplot(summary_critters, aes(x = critters_bin, y = empirical_stat, color = condition, group = condition)) +
-  geom_line(linewidth = 1) + geom_point(size = 2.5) +
-  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.1) +
-  scale_color_manual(values = condition_colors) +
-  scale_x_discrete(labels = c("Few" = "Few\n▪▪", "Many" = "Many\n▪▪▪▪▪")) +
-  labs(x = "Sample Size", y = "", tag = "B") +
-  theme(legend.position = "none", axis.text.x = element_text(size = 9, lineheight = 0.9)) +
-  coord_cartesian(ylim = c(24, 36))
+# Save Panel A separately
+ggsave(here("figures/exp2_fig5a.pdf"), fig5_a, width = 4, height = 4)
 
-# Panel C: Entropy (bootstrapped CIs)
-summary_entropy <- d.all %>%
-  filter(!is.na(error)) %>%
-  group_by(entropy_bin, condition) %>%
-  tidyboot_mean(error, na.rm = TRUE)
+# Panel B: All difficulty dimensions as facets (MARGINAL MEANS from emmeans)
+# Use emmeans to control for confounds - each dimension controls for the other two
 
-fig5_c <- ggplot(summary_entropy, aes(x = entropy_bin, y = empirical_stat, color = condition, group = condition)) +
-  geom_line(linewidth = 1) + geom_point(size = 2.5) +
-  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.1) +
-  scale_color_manual(values = condition_colors) +
-  scale_x_discrete(labels = c("Low" = "Low\n●○○○", "High" = "High\n●●●●")) +
-  labs(x = "Distribution", y = "", tag = "C") +
-  theme(legend.position = "none", axis.text.x = element_text(size = 9, lineheight = 0.9)) +
-  coord_cartesian(ylim = c(24, 36))
+# Sample Size: control for entropy and representativeness
+model_size <- lmer(error ~ condition * critters_bin + entropy_c + rep_c + (1 | gameID),
+                   data = d.all)
+emm_size <- emmeans(model_size, ~ condition * critters_bin)
+summary_critters <- as.data.frame(confint(emm_size)) %>%
+  mutate(dimension = "Total Sample Size",
+         level = as.character(critters_bin)) %>%
+  rename(empirical_stat = emmean, ci_lower = asymp.LCL, ci_upper = asymp.UCL)
 
-# Panel D: Representativeness (bootstrapped CIs)
-summary_rep <- d.all %>%
-  filter(!is.na(error)) %>%
-  group_by(rep_bin, condition) %>%
-  tidyboot_mean(error, na.rm = TRUE)
+# Distribution (entropy): control for sample size and representativeness
+model_entropy <- lmer(error ~ condition * entropy_bin + critters_c + rep_c + (1 | gameID),
+                      data = d.all)
+emm_entropy <- emmeans(model_entropy, ~ condition * entropy_bin)
+summary_entropy <- as.data.frame(confint(emm_entropy)) %>%
+  mutate(dimension = "Distribution",
+         level = as.character(entropy_bin)) %>%
+  rename(empirical_stat = emmean, ci_lower = asymp.LCL, ci_upper = asymp.UCL)
 
-fig5_d <- ggplot(summary_rep, aes(x = rep_bin, y = empirical_stat, color = condition, group = condition)) +
-  geom_line(linewidth = 1) + geom_point(size = 2.5) +
-  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.1) +
+# Representativeness: control for sample size and entropy
+model_rep <- lmer(error ~ condition * rep_bin + critters_c + entropy_c + (1 | gameID),
+                  data = d.all)
+emm_rep <- emmeans(model_rep, ~ condition * rep_bin)
+summary_rep <- as.data.frame(confint(emm_rep)) %>%
+  mutate(dimension = "Representativeness",
+         level = as.character(rep_bin)) %>%
+  rename(empirical_stat = emmean, ci_lower = asymp.LCL, ci_upper = asymp.UCL)
+
+# Combine all dimensions
+summary_all <- bind_rows(summary_critters, summary_entropy, summary_rep) %>%
+  mutate(
+    dimension = factor(dimension, levels = c("Total Sample Size", "Distribution", "Representativeness")),
+    # Rename Low/High to Uneven/Even for distribution
+    level = recode(level, "Low" = "Uneven", "High" = "Even"),
+    # Order all as [hard, easy]: Few→Many, Uneven→Even, Unrepresentative→Representative
+    level = factor(level, levels = c("Few", "Many", "Uneven", "Even", "Unrepresentative", "Representative"))
+  )
+
+fig5_b <- ggplot(summary_all, aes(x = level, y = empirical_stat, color = condition, group = condition)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.15) +
+  facet_wrap(~ dimension, scales = "free_x", nrow = 1) +
   scale_color_manual(values = condition_colors,
                      labels = c("interactive" = "Chat", "slider" = "Slider"),
-                     name = "Condition") +
-  scale_x_discrete(labels = c("Representative" = "Representative\n◐◐◐◐", "Unrepresentative" = "Unrepresentative\n●○●○")) +
-  labs(x = "Representativeness", y = "", tag = "D") +
-  theme(legend.position = "bottom", axis.text.x = element_text(size = 8, lineheight = 0.9)) +
-  coord_cartesian(ylim = c(24, 36))
+                     name = NULL) +
+  labs(x = NULL, y = "Mean Absolute Error", tag = "B") +
+  theme_few() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 9, angle = 30, hjust = 1),
+        strip.text = element_text(size = 10)) +
+  coord_cartesian(ylim = c(15, 34))
 
-# Combine
-fig5 <- (fig5_a | fig5_b | fig5_c | fig5_d) +
-  plot_layout(widths = c(1.2, 1, 1, 1.1), guides = "collect") &
-  theme(legend.position = "bottom")
+# Combine Panel A and B (legend stays in Panel A corner only)
+fig5 <- (fig5_a | fig5_b) +
+  plot_layout(widths = c(1, 1.5))
 
 fig5
 
-ggsave(here("figures/fig5.pdf"), fig5, width = 12, height = 3.5)
-ggsave(here("figures/fig5.png"), fig5, width = 12, height = 3.5, dpi = 300)
+ggsave(here("figures/fig5.pdf"), fig5, width = 10, height = 3.5)
+ggsave(here("figures/fig5.png"), fig5, width = 10, height = 3.5, dpi = 300)
 cat("Saved Figure 5 (combined results)\n")
 ```
 
@@ -769,43 +1026,68 @@ cat("Saved Figure 5 (combined results)\n")
 
 ```{r}
 #| label: save-fig6
-#| fig-width: 10
+#| cache: false
+#| fig-width: 9
 #| fig-height: 4
 
-# Panel A: Message type frequencies
-freq_data <- d.messages %>%
-  filter(coding %in% c("pn", "pb", "sn", "sb", "o", "q")) %>%
-  count(coding) %>%
+# Natural breaks: 0%, 1-10%, >10%
+d.message_analysis <- d.message_analysis %>%
   mutate(
-    label = case_when(
-      coding == "pn" ~ "Personal\nNumeric",
-      coding == "pb" ~ "Personal\nBelief",
-      coding == "sn" ~ "Social\nNumeric",
-      coding == "sb" ~ "Social\nBelief",
-      coding == "o" ~ "Other",
-      coding == "q" ~ "Question"
-    ),
-    type = ifelse(coding %in% c("sn", "sb"), "Social", "Personal/Other")
+    social_level = factor(
+      case_when(
+        p_social == 0 ~ "0%",
+        p_social <= 0.10 ~ "1–10%",
+        p_social > 0.10 ~ ">10%"
+      ),
+      levels = c("0%", "1–10%", ">10%")
+    )
   )
 
-fig6_a <- ggplot(freq_data, aes(x = reorder(label, -n), y = n, fill = type)) +
-  geom_col() +
-  scale_fill_manual(values = c("Social" = "#0072B2", "Personal/Other" = "gray60")) +
-  labs(x = "", y = "Count", fill = "", tag = "A") +
-  theme(legend.position = "bottom", axis.text.x = element_text(size = 9))
+# Panel A: Error by social relay level (bootstrapped CIs)
+social_summary <- d.message_analysis %>%
+  filter(!is.na(social_level)) %>%
+  group_by(social_level) %>%
+  tidyboot_mean(avg_error, na.rm = TRUE)
 
-# Panel B: Social information vs error
-fig6_b <- ggplot(d.message_analysis, aes(x = p_social, y = avg_error)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "lm", color = "#0072B2") +
-  labs(x = "Proportion Social Information", y = "Final Round Error", tag = "B")
+fig6_a <- ggplot(social_summary, aes(x = social_level, y = empirical_stat)) +
+  geom_col(fill = "#0072B2", alpha = 0.7, width = 0.6) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  labs(x = "% Messages Relaying Social Information", y = "Final Round Error", tag = "A") +
+  theme_few() +
+  theme(axis.text.x = element_text(size = 12)) +
+  coord_cartesian(ylim = c(0, 25))
 
-fig6 <- fig6_a + fig6_b + plot_layout(widths = c(1, 1))
+# Panel B: Example messages (as a table/text panel)
+# Create a simple visualization showing example messages
+examples <- tibble(
+  Category = c("Personal\nNumeric", "Personal\nNumeric",
+               "Social\nNumeric", "Social\nNumeric"),
+  Example = c(
+    "\"4 rabbits, 2 squirrels\"",
+    "\"I saw more rabbits\"",
+    "\"My neighbor saw 11 rabbits\nand 1 squirrel\"",
+    "\"I have gathered 22 rabbits\nfrom everyone\""
+  ),
+  Type = c("Personal", "Personal", "Social", "Social")
+)
+
+fig6_b <- ggplot(examples, aes(x = 1, y = rev(seq_along(Example)))) +
+
+  geom_label(aes(label = Example, fill = Type),
+             hjust = 0, size = 3, label.padding = unit(0.4, "lines")) +
+  scale_fill_manual(values = c("Personal" = "gray85", "Social" = "#0072B2"),
+                    guide = "none") +
+  scale_x_continuous(limits = c(0.9, 3)) +
+  labs(tag = "B") +
+  theme_void() +
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+fig6 <- fig6_a + fig6_b + plot_layout(widths = c(1.2, 1))
 
 fig6
 
-ggsave(here("figures/fig6.pdf"), fig6, width = 10, height = 4)
-ggsave(here("figures/fig6.png"), fig6, width = 10, height = 4, dpi = 300)
+ggsave(here("figures/fig6.pdf"), fig6, width = 9, height = 4)
+ggsave(here("figures/fig6.png"), fig6, width = 9, height = 4, dpi = 300)
 cat("Saved Figure 6 (message content)\n")
 ```
 
@@ -835,4 +1117,199 @@ print(coef_table %>% select(dimension, estimate, conf.low, conf.high, p.value))
 
 cat("\n=== Analysis 4: Message content ===\n")
 cat("Social information effect from model4_social\n")
+```
+
+---
+
+# Robustness Analyses
+
+## Robustness 1: Exclude Low Response Rate Participants
+
+Following Experiment 1's pre-registered criterion, we exclude participants with <80% response rate.
+
+```{r}
+#| label: robustness-response-rate
+
+# Calculate response rates per participant
+response_rates <- d.all %>%
+  bind_rows(d.slider_baseline) %>%  # Include baseline for full picture
+  group_by(playerID) %>%
+  summarise(
+    total_possible = max(idx_shifted, na.rm = TRUE) + 1,
+    responses = sum(!is.na(guess)),
+    response_rate = responses / 8,  # 8 rounds total in Exp2
+    .groups = "drop"
+  )
+
+cat("Response rate distribution:\n")
+print(summary(response_rates$response_rate))
+
+# Apply 80% threshold
+exclude_low_response <- response_rates %>%
+  filter(response_rate < 0.80) %>%
+  pull(playerID)
+
+cat("\nParticipants excluded (response rate < 80%):", length(exclude_low_response), "\n")
+
+# Create filtered dataset
+d.robust1 <- d.all %>%
+  filter(!(playerID %in% exclude_low_response))
+
+cat("Remaining after exclusion:", n_distinct(d.robust1$playerID), "participants,",
+    n_distinct(d.robust1$gameID), "games\n")
+
+# Re-run key model with effect-coded variables
+if(nrow(d.robust1) > 100) {
+  model_robust1 <- lmer(
+    error ~ condition_c * rep_c + (1 | gameID/playerID),
+    data = d.robust1
+  )
+
+  cat("\n=== Robustness: Condition × Representativeness (80% response rate) ===\n")
+  coef_robust1 <- fixef(model_robust1)
+  cat("Condition × Rep interaction: b =",
+      round(coef_robust1["condition_c:rep_c"], 2), "\n")
+  print(summary(model_robust1)$coefficients)
+}
+```
+
+## Robustness 2: Exclude Magnet Values
+
+Excluding guesses of exactly 0%, 50%, or 100% which may indicate inattention.
+
+```{r}
+#| label: robustness-magnet
+
+# Count magnet values
+cat("Magnet value frequencies:\n")
+d.all %>%
+  mutate(magnet_type = case_when(
+    guess == 0 ~ "0%",
+    guess == 50 ~ "50%",
+    guess == 100 ~ "100%",
+    TRUE ~ "Other"
+  )) %>%
+  count(magnet_type) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  print()
+
+# Create filtered dataset
+d.robust2 <- d.all %>%
+  filter(!guess %in% c(0, 50, 100))
+
+cat("\nAfter excluding magnet values:", nrow(d.robust2), "observations\n")
+
+# Re-run key model with effect-coded variables
+if(nrow(d.robust2) > 100) {
+  model_robust2 <- lmer(
+    error ~ condition_c * rep_c + (1 | gameID/playerID),
+    data = d.robust2
+  )
+
+  cat("\n=== Robustness: Condition × Representativeness (no magnet values) ===\n")
+  coef_robust2 <- fixef(model_robust2)
+  cat("Condition × Rep interaction: b =",
+      round(coef_robust2["condition_c:rep_c"], 2), "\n")
+  print(summary(model_robust2)$coefficients)
+}
+```
+
+## Robustness 3: Full Games Only (4 Active Players)
+
+Restricting to games where all 4 players remained active.
+
+```{r}
+#| label: robustness-full-games
+
+# Count active players per game
+games_by_size <- d.all %>%
+  group_by(gameID) %>%
+  summarise(n_active = n_distinct(playerID), .groups = "drop")
+
+cat("Games by number of active players:\n")
+print(table(games_by_size$n_active))
+
+# Filter to full games only
+full_games <- games_by_size %>%
+  filter(n_active == 4) %>%
+  pull(gameID)
+
+d.robust3 <- d.all %>%
+  filter(gameID %in% full_games)
+
+cat("\nFull games (4 players):", length(full_games), "games,",
+    nrow(d.robust3), "observations\n")
+
+# Re-run key model with effect-coded variables
+if(nrow(d.robust3) > 100) {
+  model_robust3 <- lmer(
+    error ~ condition_c * rep_c + (1 | gameID/playerID),
+    data = d.robust3
+  )
+
+  cat("\n=== Robustness: Condition × Representativeness (full games only) ===\n")
+  coef_robust3 <- fixef(model_robust3)
+  cat("Condition × Rep interaction: b =",
+      round(coef_robust3["condition_c:rep_c"], 2), "\n")
+  print(summary(model_robust3)$coefficients)
+}
+```
+
+## Robustness Summary
+
+```{r}
+#| label: robustness-summary
+
+cat("\n========================================\n")
+cat("ROBUSTNESS SUMMARY: Condition × Representativeness Interaction\n")
+cat("========================================\n\n")
+
+# Helper to extract full statistics
+get_stats <- function(model, term) {
+  if(is.null(model)) return(list(b=NA, t=NA, df=NA, p=NA))
+  coefs <- summary(model)$coefficients
+  if(term %in% rownames(coefs)) {
+    list(
+      b = coefs[term, "Estimate"],
+      t = coefs[term, "t value"],
+      df = coefs[term, "df"],
+      p = coefs[term, "Pr(>|t|)"]
+    )
+  } else {
+    list(b=NA, t=NA, df=NA, p=NA)
+  }
+}
+
+# Extract from all models
+models <- list(
+  "Main (ITT)" = model3_interactions,
+  "80% Response Rate" = if(exists("model_robust1")) model_robust1 else NULL,
+  "No Magnet Values" = if(exists("model_robust2")) model_robust2 else NULL,
+  "Full Games Only" = if(exists("model_robust3")) model_robust3 else NULL
+)
+
+results <- map_dfr(names(models), function(name) {
+  stats <- get_stats(models[[name]], "condition_c:rep_c")
+  tibble(
+    Analysis = name,
+    b = stats$b,
+    t = stats$t,
+    df = stats$df,
+    p = stats$p
+  )
+})
+
+# Format for display
+results <- results %>%
+  mutate(
+    `t(df)` = sprintf("t(%.0f) = %.2f", df, t),
+    p_formatted = ifelse(p < 0.001, "< .001", sprintf("= %.3f", p)),
+    Significant = ifelse(p < 0.05, "*", "")
+  )
+
+cat("Condition × Representativeness interaction:\n\n")
+results %>%
+  select(Analysis, b, `t(df)`, p_formatted, Significant) %>%
+  mutate(b = round(b, 2)) %>%
+  print()
 ```

@@ -1,26 +1,40 @@
 """
 Computational Models of Social Learning - Experiment 1 Model Fitting
 
-This is the single entry point for fitting all models to Experiment 1 data.
+Fits two model families to Experiment 1 belief update data using TRANSITION-BASED
+fitting (predicting belief at t+1 given state at t). This approach directly tests
+each model's update rule against human behavior.
 
-Models (structurally matched with anchoring in both):
-  1. DeGroot + Anchoring: Belief averaging with self-weight (α) and anchoring (β)
-  2. Count + Relative Anchoring: Evidence pooling with discount (δ), inertia (γ),
-     and sample-size-dependent anchoring (β_scale)
+Models
+------
+1. DeGroot (Slider condition)
+   - Uses partner's BELIEF (transmitted via slider interface)
+   - Update: degroot_step = α × own_belief + (1-α) × partner_belief
+   - Response: belief = w_update × degroot_step + w_mle × own_mle + w_mid × 0.5
+   - Parameters: α (self-weight), w_update, w_mle, w_mid (response weights)
 
-The key theoretical distinction:
-  - DeGroot uses partner's BELIEF (available in slider condition)
-  - Count uses partner's COUNTS (available in chat condition)
+2. Count (Chat condition)
+   - Uses partner's COUNTS (transmitted via chat interface)
+   - Pooled MLE: pooled = (own_r + δ×cum_r) / (own_n + δ×cum_n)
+   - Update: count_step = α × own_belief + (1-α) × pooled_mle
+   - Response: belief = w_update × count_step + w_mle × own_mle + w_mid × 0.5
+   - Parameters: δ (evidence discount), α (self-weight), w_update, w_mle, w_mid
 
-Both models include anchoring to own MLE, but Count's anchoring is "relative":
-  β_i = β_scale × (1 - relative_sample_size × n_players)
-  Players with smaller samples anchor MORE to their own (noisy) MLE.
+Key Theoretical Distinction
+---------------------------
+The information available differs by condition:
+  - Slider: Partners share beliefs → DeGroot averaging is natural
+  - Chat: Partners share counts → Evidence pooling is natural
 
-Fitting approach:
-  TRANSITION-BASED: Fits round-to-round belief transitions.
-  This directly tests each model's update rule against human behavior.
+The crossover prediction: DeGroot fits slider better, Count fits chat better.
 
-Usage:
+Output
+------
+- fit_results.csv: All fitted parameters, MSE, AIC, and σ (derived from √MSE)
+- Console: AIC comparison table and LaTeX-formatted table
+
+Usage
+-----
   python fit.py
 """
 
@@ -161,17 +175,23 @@ def prepare_transitions(beliefs: pd.DataFrame,
 
 @dataclass
 class DeGrootParams:
-    """DeGroot + Anchoring: 2 parameters."""
-    alpha: float  # Self-weight in DeGroot averaging
-    beta: float   # Anchor strength toward own MLE
+    """DeGroot with response weights: 3 model parameters + derived sigma."""
+    alpha: float     # Self-weight in DeGroot averaging
+    w_update: float  # Weight on DeGroot update
+    w_mle: float     # Weight on own MLE
+    w_mid: float     # Weight on 0.5 (midpoint anchor)
+    sigma: float     # Response noise std dev (derived from MSE)
 
 
 @dataclass
 class CountParams:
-    """Count + Relative Anchoring: 3 parameters."""
-    delta: float      # Evidence discount for others' counts
-    gamma: float      # Update inertia
-    beta_scale: float # Anchoring scale (β = β_scale × (1 - relative_size × n))
+    """Count with response weights: 4 model parameters + derived sigma."""
+    delta: float     # Evidence discount for others' counts
+    alpha: float     # Self-weight on current belief
+    w_update: float  # Weight on count update
+    w_mle: float     # Weight on own MLE
+    w_mid: float     # Weight on 0.5 (midpoint anchor)
+    sigma: float     # Response noise std dev (derived from MSE)
 
 
 # =============================================================================
@@ -180,27 +200,29 @@ class CountParams:
 
 def degroot_predict(row, params: DeGrootParams) -> float:
     """
-    DeGroot + Anchoring prediction.
+    DeGroot prediction with linear response combination.
 
     Update rule:
         degroot_step = α × own_belief + (1-α) × partner_belief
-        prediction = β × own_mle + (1-β) × degroot_step
+
+    Response:
+        belief = w_update × degroot_step + w_mle × own_mle + w_mid × 0.5
     """
     degroot_step = params.alpha * row['own_belief'] + (1 - params.alpha) * row['partner_belief']
-    return params.beta * row['own_mle'] + (1 - params.beta) * degroot_step
+    belief = params.w_update * degroot_step + params.w_mle * row['own_mle'] + params.w_mid * 0.5
+    return belief
 
 
 def count_predict(row, params: CountParams) -> float:
     """
-    Count + Relative Anchoring prediction.
+    Count prediction with linear response combination.
 
     Update rule:
         pooled_mle = (own_r + δ × cumulative_r) / (own_n + δ × cumulative_n)
-        pooled_step = γ × own_belief + (1-γ) × pooled_mle
-        β_i = β_scale × (1 - relative_size × n_players)
-        prediction = β_i × own_mle + (1-β_i) × pooled_step
+        count_step = α × own_belief + (1-α) × pooled_mle
 
-    Players with smaller relative samples anchor MORE to their own MLE.
+    Response:
+        belief = w_update × count_step + w_mle × own_mle + w_mid × 0.5
     """
     own_n = row['own_r'] + row['own_s']
     cumulative_n = row['cumulative_r'] + row['cumulative_s']
@@ -210,14 +232,11 @@ def count_predict(row, params: CountParams) -> float:
     pooled_n = own_n + params.delta * cumulative_n
     pooled_mle = pooled_r / pooled_n if pooled_n > 0 else 0.5
 
-    # Inertia step
-    pooled_step = params.gamma * row['own_belief'] + (1 - params.gamma) * pooled_mle
+    # Self-weight step
+    count_step = params.alpha * row['own_belief'] + (1 - params.alpha) * pooled_mle
 
-    # Relative anchoring: smaller samples → stronger anchoring
-    beta = params.beta_scale * (1 - row['relative_size'] * row['n_players'])
-    beta = np.clip(beta, 0, 0.9)
-
-    return beta * row['own_mle'] + (1 - beta) * pooled_step
+    belief = params.w_update * count_step + params.w_mle * row['own_mle'] + params.w_mid * 0.5
+    return belief
 
 
 # =============================================================================
@@ -225,35 +244,47 @@ def count_predict(row, params: CountParams) -> float:
 # =============================================================================
 
 def fit_degroot(transitions: pd.DataFrame, with_anchor: bool = True) -> Tuple[DeGrootParams, float]:
-    """Fit DeGroot model to transitions."""
+    """Fit DeGroot model. Returns params and MSE."""
+    actual = transitions['actual_next'].values
+
     if with_anchor:
+        # Full model: α + response weights (w_update, w_mle, w_mid)
+        # Weights are free parameters (not constrained to sum to 1)
         def objective(params_array):
-            alpha, beta = params_array
-            if not (0 < alpha < 1 and 0 < beta < 1):
+            alpha, w_update, w_mle, w_mid = params_array
+            if not (0 < alpha < 1):
                 return 1e10
-            params = DeGrootParams(alpha=alpha, beta=beta)
-            preds = transitions.apply(lambda r: degroot_predict(r, params), axis=1)
-            return np.mean((preds - transitions['actual_next']) ** 2)
+            params = DeGrootParams(alpha=alpha, w_update=w_update, w_mle=w_mle,
+                                  w_mid=w_mid, sigma=0.0)
+            preds = transitions.apply(lambda r: degroot_predict(r, params), axis=1).values
+            return np.mean((preds - actual) ** 2)
 
         best_result, best_mse = None, np.inf
         for a0 in [0.6, 0.75, 0.85]:
-            for b0 in [0.1, 0.2, 0.3]:
-                result = minimize(objective, x0=[a0, b0],
-                                bounds=[(0.01, 0.99), (0.01, 0.99)],
-                                method='L-BFGS-B')
-                if result.fun < best_mse:
-                    best_mse = result.fun
-                    best_result = result
-        return DeGrootParams(alpha=best_result.x[0], beta=best_result.x[1]), best_mse
+            for wu0 in [0.5, 0.7, 0.9]:
+                for wm0 in [0.0, 0.1, 0.2]:
+                    for wr0 in [0.0, 0.1, 0.3]:
+                        result = minimize(objective, x0=[a0, wu0, wm0, wr0],
+                                        bounds=[(0.01, 0.99), (-2.0, 2.0), (-1.0, 1.0), (-1.0, 2.0)],
+                                        method='L-BFGS-B')
+                        if result.fun < best_mse:
+                            best_mse = result.fun
+                            best_result = result
+
+        sigma = np.sqrt(best_mse)
+        return DeGrootParams(alpha=best_result.x[0], w_update=best_result.x[1],
+                            w_mle=best_result.x[2], w_mid=best_result.x[3],
+                            sigma=sigma), best_mse
+
     else:
-        # Ablated: no anchoring (β=0)
+        # Base model: α only (1 param), w_update=1.0, w_mle=0.0, w_mid=0.0
         def objective(params_array):
             alpha = params_array[0]
             if not (0 < alpha < 1):
                 return 1e10
-            params = DeGrootParams(alpha=alpha, beta=0.0)
-            preds = transitions.apply(lambda r: degroot_predict(r, params), axis=1)
-            return np.mean((preds - transitions['actual_next']) ** 2)
+            params = DeGrootParams(alpha=alpha, w_update=1.0, w_mle=0.0, w_mid=0.0, sigma=0.0)
+            preds = transitions.apply(lambda r: degroot_predict(r, params), axis=1).values
+            return np.mean((preds - actual) ** 2)
 
         best_result, best_mse = None, np.inf
         for a0 in [0.6, 0.75, 0.85]:
@@ -263,53 +294,70 @@ def fit_degroot(transitions: pd.DataFrame, with_anchor: bool = True) -> Tuple[De
             if result.fun < best_mse:
                 best_mse = result.fun
                 best_result = result
-        return DeGrootParams(alpha=best_result.x[0], beta=0.0), best_mse
+
+        sigma = np.sqrt(best_mse)
+        return DeGrootParams(alpha=best_result.x[0], w_update=1.0, w_mle=0.0,
+                            w_mid=0.0, sigma=sigma), best_mse
 
 
 def fit_count(transitions: pd.DataFrame, with_anchor: bool = True) -> Tuple[CountParams, float]:
-    """Fit Count model to transitions."""
+    """Fit Count model. Returns params and MSE."""
+    actual = transitions['actual_next'].values
+
     if with_anchor:
+        # Full model: δ, α + response weights (free parameters)
         def objective(params_array):
-            delta, gamma, beta_scale = params_array
-            if not (0 < delta < 3 and 0 < gamma < 1 and 0 <= beta_scale < 2):
+            delta, alpha, w_update, w_mle, w_mid = params_array
+            if not (0 < delta < 3 and 0 < alpha < 1):
                 return 1e10
-            params = CountParams(delta=delta, gamma=gamma, beta_scale=beta_scale)
-            preds = transitions.apply(lambda r: count_predict(r, params), axis=1)
-            return np.mean((preds - transitions['actual_next']) ** 2)
+            params = CountParams(delta=delta, alpha=alpha, w_update=w_update,
+                               w_mle=w_mle, w_mid=w_mid, sigma=0.0)
+            preds = transitions.apply(lambda r: count_predict(r, params), axis=1).values
+            return np.mean((preds - actual) ** 2)
 
         best_result, best_mse = None, np.inf
         for d0 in [0.3, 0.5, 0.7]:
-            for g0 in [0.3, 0.5, 0.7]:
-                for bs0 in [0.1, 0.3, 0.5]:
-                    result = minimize(objective, x0=[d0, g0, bs0],
-                                    bounds=[(0.01, 2.0), (0.01, 0.99), (0.0, 1.5)],
-                                    method='L-BFGS-B')
-                    if result.fun < best_mse:
-                        best_mse = result.fun
-                        best_result = result
-        return CountParams(delta=best_result.x[0], gamma=best_result.x[1],
-                           beta_scale=best_result.x[2]), best_mse
+            for a0 in [0.3, 0.5, 0.7]:
+                for wu0 in [0.5, 0.7, 0.9]:
+                    for wm0 in [0.0, 0.1, 0.2]:
+                        for wr0 in [0.0, 0.1, 0.3]:
+                            result = minimize(objective, x0=[d0, a0, wu0, wm0, wr0],
+                                            bounds=[(0.01, 2.0), (0.01, 0.99),
+                                                    (-2.0, 2.0), (-1.0, 1.0), (-1.0, 2.0)],
+                                            method='L-BFGS-B')
+                            if result.fun < best_mse:
+                                best_mse = result.fun
+                                best_result = result
+
+        sigma = np.sqrt(best_mse)
+        return CountParams(delta=best_result.x[0], alpha=best_result.x[1],
+                          w_update=best_result.x[2], w_mle=best_result.x[3],
+                          w_mid=best_result.x[4], sigma=sigma), best_mse
+
     else:
-        # Ablated: no relative anchoring (β_scale=0)
+        # Base model: δ, α only (2 params), w_update=1.0, w_mle=0.0, w_mid=0.0
         def objective(params_array):
-            delta, gamma = params_array
-            if not (0 < delta < 3 and 0 < gamma < 1):
+            delta, alpha = params_array
+            if not (0 < delta < 3 and 0 < alpha < 1):
                 return 1e10
-            params = CountParams(delta=delta, gamma=gamma, beta_scale=0.0)
-            preds = transitions.apply(lambda r: count_predict(r, params), axis=1)
-            return np.mean((preds - transitions['actual_next']) ** 2)
+            params = CountParams(delta=delta, alpha=alpha, w_update=1.0,
+                               w_mle=0.0, w_mid=0.0, sigma=0.0)
+            preds = transitions.apply(lambda r: count_predict(r, params), axis=1).values
+            return np.mean((preds - actual) ** 2)
 
         best_result, best_mse = None, np.inf
         for d0 in [0.3, 0.5, 0.7]:
-            for g0 in [0.3, 0.5, 0.7]:
-                result = minimize(objective, x0=[d0, g0],
+            for a0 in [0.3, 0.5, 0.7]:
+                result = minimize(objective, x0=[d0, a0],
                                 bounds=[(0.01, 2.0), (0.01, 0.99)],
                                 method='L-BFGS-B')
                 if result.fun < best_mse:
                     best_mse = result.fun
                     best_result = result
-        return CountParams(delta=best_result.x[0], gamma=best_result.x[1],
-                           beta_scale=0.0), best_mse
+
+        sigma = np.sqrt(best_mse)
+        return CountParams(delta=best_result.x[0], alpha=best_result.x[1],
+                          w_update=1.0, w_mle=0.0, w_mid=0.0, sigma=sigma), best_mse
 
 
 # =============================================================================
@@ -345,56 +393,39 @@ if __name__ == "__main__":
     print(f"  Chat: {n_chat} transitions")
 
     # =========================================================================
-    # FIT ALL MODELS (full and ablated)
+    # FIT ALL MODELS (with and without anchoring)
     # =========================================================================
 
-    print("\n" + "-" * 70)
-    print("SLIDER CONDITION")
-    print("-" * 70)
+    fits = {}
 
-    # DeGroot (no anchor)
-    dg0_slider, dg0_slider_mse = fit_degroot(slider_trans, with_anchor=False)
-    dg0_slider_aic = compute_aic(dg0_slider_mse, n_slider, 1)
-    print(f"  DeGroot:            α={dg0_slider.alpha:.2f}, AIC={dg0_slider_aic:.1f}")
+    for cond_name, trans, n_obs in [('slider', slider_trans, n_slider), ('chat', chat_trans, n_chat)]:
+        print(f"\n{'-'*70}\n{cond_name.upper()} CONDITION\n{'-'*70}")
 
-    # DeGroot + Anchoring
-    dg_slider, dg_slider_mse = fit_degroot(slider_trans, with_anchor=True)
-    dg_slider_aic = compute_aic(dg_slider_mse, n_slider, 2)
-    print(f"  DeGroot + Anchor:   α={dg_slider.alpha:.2f}, β={dg_slider.beta:.2f}, AIC={dg_slider_aic:.1f}")
+        # DeGroot family
+        for anchor in [False, True]:
+            p, mse = fit_degroot(trans, with_anchor=anchor)
+            k = 1 + 3*int(anchor)  # 1 param base, +3 for anchor (w_update, w_mle, w_mid)
+            aic = compute_aic(mse, n_obs, k)
 
-    # Count (no anchor)
-    ct0_slider, ct0_slider_mse = fit_count(slider_trans, with_anchor=False)
-    ct0_slider_aic = compute_aic(ct0_slider_mse, n_slider, 2)
-    print(f"  Count:              δ={ct0_slider.delta:.2f}, γ={ct0_slider.gamma:.2f}, AIC={ct0_slider_aic:.1f}")
+            label = "DeGroot" + (" + Response" if anchor else "")
+            fits[(cond_name, 'degroot', anchor)] = {'params': p, 'mse': mse, 'aic': aic, 'k': k}
+            if anchor:
+                print(f"  {label:25s} α={p.alpha:.2f}, wu={p.w_update:.2f}, wm={p.w_mle:.2f}, wr={p.w_mid:.2f}, σ={p.sigma:.3f}, k={k}, AIC={aic:.1f}")
+            else:
+                print(f"  {label:25s} α={p.alpha:.2f}, σ={p.sigma:.3f}, k={k}, AIC={aic:.1f}")
 
-    # Count + Relative Anchoring
-    ct_slider, ct_slider_mse = fit_count(slider_trans, with_anchor=True)
-    ct_slider_aic = compute_aic(ct_slider_mse, n_slider, 3)
-    print(f"  Count + RelAnchor:  δ={ct_slider.delta:.2f}, γ={ct_slider.gamma:.2f}, β_s={ct_slider.beta_scale:.2f}, AIC={ct_slider_aic:.1f}")
+        # Count family
+        for anchor in [False, True]:
+            p, mse = fit_count(trans, with_anchor=anchor)
+            k = 2 + 3*int(anchor)  # 2 params base, +3 for anchor (w_update, w_mle, w_mid)
+            aic = compute_aic(mse, n_obs, k)
 
-    print("\n" + "-" * 70)
-    print("CHAT CONDITION")
-    print("-" * 70)
-
-    # DeGroot (no anchor)
-    dg0_chat, dg0_chat_mse = fit_degroot(chat_trans, with_anchor=False)
-    dg0_chat_aic = compute_aic(dg0_chat_mse, n_chat, 1)
-    print(f"  DeGroot:            α={dg0_chat.alpha:.2f}, AIC={dg0_chat_aic:.1f}")
-
-    # DeGroot + Anchoring
-    dg_chat, dg_chat_mse = fit_degroot(chat_trans, with_anchor=True)
-    dg_chat_aic = compute_aic(dg_chat_mse, n_chat, 2)
-    print(f"  DeGroot + Anchor:   α={dg_chat.alpha:.2f}, β={dg_chat.beta:.2f}, AIC={dg_chat_aic:.1f}")
-
-    # Count (no anchor)
-    ct0_chat, ct0_chat_mse = fit_count(chat_trans, with_anchor=False)
-    ct0_chat_aic = compute_aic(ct0_chat_mse, n_chat, 2)
-    print(f"  Count:              δ={ct0_chat.delta:.2f}, γ={ct0_chat.gamma:.2f}, AIC={ct0_chat_aic:.1f}")
-
-    # Count + Relative Anchoring
-    ct_chat, ct_chat_mse = fit_count(chat_trans, with_anchor=True)
-    ct_chat_aic = compute_aic(ct_chat_mse, n_chat, 3)
-    print(f"  Count + RelAnchor:  δ={ct_chat.delta:.2f}, γ={ct_chat.gamma:.2f}, β_s={ct_chat.beta_scale:.2f}, AIC={ct_chat_aic:.1f}")
+            label = "Count" + (" + Response" if anchor else "")
+            fits[(cond_name, 'count', anchor)] = {'params': p, 'mse': mse, 'aic': aic, 'k': k}
+            if anchor:
+                print(f"  {label:25s} δ={p.delta:.2f}, α={p.alpha:.2f}, wu={p.w_update:.2f}, wm={p.w_mle:.2f}, wr={p.w_mid:.2f}, σ={p.sigma:.3f}, k={k}, AIC={aic:.1f}")
+            else:
+                print(f"  {label:25s} δ={p.delta:.2f}, α={p.alpha:.2f}, σ={p.sigma:.3f}, k={k}, AIC={aic:.1f}")
 
     # =========================================================================
     # SUMMARY TABLE
@@ -403,69 +434,89 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("AIC COMPARISON TABLE")
     print("=" * 70)
-    print(f"""
-                              Slider          Chat           k
-                              ------          ----          ---
-DeGroot                      {dg0_slider_aic:8.1f}      {dg0_chat_aic:8.1f}          1
-DeGroot + Anchoring          {dg_slider_aic:8.1f}      {dg_chat_aic:8.1f}          2
-Count                        {ct0_slider_aic:8.1f}      {ct0_chat_aic:8.1f}          2
-Count + Relative Anchoring   {ct_slider_aic:8.1f}      {ct_chat_aic:8.1f}          3
 
-Best DeGroot family:         {min(dg0_slider_aic, dg_slider_aic):8.1f}      {min(dg0_chat_aic, dg_chat_aic):8.1f}
-Best Count family:           {min(ct0_slider_aic, ct_slider_aic):8.1f}      {min(ct0_chat_aic, ct_chat_aic):8.1f}
+    models = [
+        ("DeGroot", 'degroot', False),
+        ("DeGroot + Response", 'degroot', True),
+        ("Count", 'count', False),
+        ("Count + Response", 'count', True),
+    ]
 
-ΔAIC (best Count - best DG)  {min(ct0_slider_aic, ct_slider_aic) - min(dg0_slider_aic, dg_slider_aic):+8.1f}      {min(ct0_chat_aic, ct_chat_aic) - min(dg0_chat_aic, dg_chat_aic):+8.1f}
+    print(f"\n{'Model':<30s} {'Slider':>10s} {'Chat':>10s} {'k':>5s}")
+    print("-" * 60)
+    for label, model, anchor in models:
+        s_aic = fits[('slider', model, anchor)]['aic']
+        c_aic = fits[('chat', model, anchor)]['aic']
+        k = fits[('slider', model, anchor)]['k']
+        print(f"{label:<30s} {s_aic:10.1f} {c_aic:10.1f} {k:5d}")
 
-  Positive = DeGroot better, Negative = Count better
-""")
+    # Best in each family (with anchoring)
+    best_dg_slider = fits[('slider', 'degroot', True)]['aic']
+    best_dg_chat = fits[('chat', 'degroot', True)]['aic']
+    best_ct_slider = fits[('slider', 'count', True)]['aic']
+    best_ct_chat = fits[('chat', 'count', True)]['aic']
+
+    print("-" * 60)
+    print(f"\n{'ΔAIC (Count - DeGroot)':<30s} {best_ct_slider - best_dg_slider:+10.1f} {best_ct_chat - best_dg_chat:+10.1f}")
+    print("  (comparing full models with anchoring)")
+    print("  Positive = DeGroot better, Negative = Count better")
 
     # LaTeX table
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("LATEX TABLE")
     print("=" * 70)
-    print(f"""
-\\begin{{table}}[t]
+    print("""
+\\begin{table}[t]
 \\centering
-\\caption{{Model comparison (Experiment 1). Lower AIC = better fit. $k$ = number of parameters.}}
-\\label{{tab:model-comparison}}
-\\begin{{tabular}}{{lccc}}
+\\caption{Model comparison (Experiment 1). Lower AIC = better fit. $k$ = number of parameters.}
+\\label{tab:model-comparison}
+\\begin{tabular}{lccc}
 \\toprule
 Model & Slider & Chat & $k$ \\\\
-\\midrule
-DeGroot & ${dg0_slider_aic:.0f}$ & ${dg0_chat_aic:.0f}$ & 1 \\\\
-DeGroot + Anchoring & ${dg_slider_aic:.0f}$ & ${dg_chat_aic:.0f}$ & 2 \\\\
-\\midrule
-Count & ${ct0_slider_aic:.0f}$ & ${ct0_chat_aic:.0f}$ & 2 \\\\
-Count + Relative Anchoring & ${ct_slider_aic:.0f}$ & ${ct_chat_aic:.0f}$ & 3 \\\\
-\\bottomrule
-\\end{{tabular}}
-\\end{{table}}
+\\midrule""")
+    for label, model, anchor in models:
+        s_aic = fits[('slider', model, anchor)]['aic']
+        c_aic = fits[('chat', model, anchor)]['aic']
+        k = fits[('slider', model, anchor)]['k']
+        if label == "Count":
+            print("\\midrule")
+        print(f"{label} & ${s_aic:.0f}$ & ${c_aic:.0f}$ & {k} \\\\")
+    print("""\\bottomrule
+\\end{tabular}
+\\end{table}
 """)
 
     # Save results
-    results = pd.DataFrame([
-        {'condition': 'slider', 'model': 'degroot', 'anchor': False,
-         'alpha': dg0_slider.alpha, 'mse': dg0_slider_mse, 'aic': dg0_slider_aic, 'k': 1},
-        {'condition': 'slider', 'model': 'degroot', 'anchor': True,
-         'alpha': dg_slider.alpha, 'beta': dg_slider.beta,
-         'mse': dg_slider_mse, 'aic': dg_slider_aic, 'k': 2},
-        {'condition': 'slider', 'model': 'count', 'anchor': False,
-         'delta': ct0_slider.delta, 'gamma': ct0_slider.gamma,
-         'mse': ct0_slider_mse, 'aic': ct0_slider_aic, 'k': 2},
-        {'condition': 'slider', 'model': 'count', 'anchor': True,
-         'delta': ct_slider.delta, 'gamma': ct_slider.gamma, 'beta_scale': ct_slider.beta_scale,
-         'mse': ct_slider_mse, 'aic': ct_slider_aic, 'k': 3},
-        {'condition': 'chat', 'model': 'degroot', 'anchor': False,
-         'alpha': dg0_chat.alpha, 'mse': dg0_chat_mse, 'aic': dg0_chat_aic, 'k': 1},
-        {'condition': 'chat', 'model': 'degroot', 'anchor': True,
-         'alpha': dg_chat.alpha, 'beta': dg_chat.beta,
-         'mse': dg_chat_mse, 'aic': dg_chat_aic, 'k': 2},
-        {'condition': 'chat', 'model': 'count', 'anchor': False,
-         'delta': ct0_chat.delta, 'gamma': ct0_chat.gamma,
-         'mse': ct0_chat_mse, 'aic': ct0_chat_aic, 'k': 2},
-        {'condition': 'chat', 'model': 'count', 'anchor': True,
-         'delta': ct_chat.delta, 'gamma': ct_chat.gamma, 'beta_scale': ct_chat.beta_scale,
-         'mse': ct_chat_mse, 'aic': ct_chat_aic, 'k': 3},
-    ])
+    rows = []
+    for (cond, model, anchor), data in fits.items():
+        p = data['params']
+        row = {
+            'condition': cond,
+            'model': model,
+            'anchor': anchor,
+            'mse': data['mse'],
+            'aic': data['aic'],
+            'k': data['k'],
+            'sigma': p.sigma,
+            'w_update': p.w_update,
+            'w_mle': p.w_mle,
+            'w_mid': p.w_mid,
+        }
+        if model == 'degroot':
+            row.update({'alpha': p.alpha})
+        else:
+            row.update({'alpha': p.alpha, 'delta': p.delta})
+        rows.append(row)
+
+    results = pd.DataFrame(rows)
     results.to_csv('fit_results.csv', index=False)
     print("\nResults saved to fit_results.csv")
+
+    # Print best params for manuscript
+    print("\n" + "=" * 70)
+    print("BEST PARAMETERS FOR MANUSCRIPT")
+    print("=" * 70)
+    dg_full = fits[('slider', 'degroot', True)]['params']
+    ct_full = fits[('chat', 'count', True)]['params']
+    print(f"Slider (DeGroot+Response): α={dg_full.alpha:.2f}, wu={dg_full.w_update:.2f}, wm={dg_full.w_mle:.2f}, wr={dg_full.w_mid:.2f}, σ={dg_full.sigma:.3f}")
+    print(f"Chat (Count+Response):     δ={ct_full.delta:.2f}, α={ct_full.alpha:.2f}, wu={ct_full.w_update:.2f}, wm={ct_full.w_mle:.2f}, wr={ct_full.w_mid:.2f}, σ={ct_full.sigma:.3f}")

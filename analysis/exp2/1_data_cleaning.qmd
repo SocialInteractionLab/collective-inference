@@ -214,14 +214,14 @@ d.9 <- bind_rows(
 )%>% 
   rename(batchID = id)
 
-decode1 <- read_json(here('analysis/2_simulations/generated_files_used/games_dontoverwrite.json'), simplifyVector = TRUE) %>%
+decode1 <- read_json(here('stimuli/exp2_combined_generation/generated_files_used/games_dontoverwrite.json'), simplifyVector = TRUE) %>%
   as_tibble() %>%
   rename(nCrittersGame = totalCritters) %>%
   rename(designatedGame = gameID)%>%
    filter(designatedGame != 10120) %>%
   mutate(representation = as.character(representation))
 
-decode3 <- read_json(here('analysis/2_simulations/generated_files_used/games_2_dontoverwrite.json'), simplifyVector = TRUE) %>%
+decode3 <- read_json(here('stimuli/exp2_combined_generation/generated_files_used/games_2_dontoverwrite.json'), simplifyVector = TRUE) %>%
   as_tibble() %>%
   rename(nCrittersGame = totalCritters) %>%
   rename(designatedGame = gameID)%>%
@@ -498,7 +498,7 @@ d.all[list_cols] <- lapply(d.all[list_cols], function(col) {
 d.messages <- d.all %>% select (chat, gameID, playerID, idx, participantID)
 d.all <- d.all %>%
   select(-messages, -emojiArray, -treatment.x, -num_players, -chat)
-write.csv(d.all, "exp2_clean_data_jan17.csv", row.names = FALSE)
+write.csv(d.all, "exp2_clean_data.csv", row.names = FALSE)
 
 
 ```
@@ -509,113 +509,9 @@ messages.df <- d.messages %>%
 
 # flatten json, keeping rows with valid data
 messages.df <- messages.df %>%
-  unnest_wider(json_data)%>% 
-  distinct()%>%  
+  unnest_wider(json_data)%>%
+  distinct()%>%
   select(-chat, -round, -time, -likes)
 
-write.csv(messages.df, "exp2_messages_jan17.csv", row.names = FALSE)
+write.csv(messages.df, "exp2_messages.csv", row.names = FALSE)
 ```
-
-\
-
-```{r}
-crash <-me
-low_direction <- read_csv(here('analysis/2_experiment_2/low_direction.csv'))
-  
-#this comes from the data_quality_control file, which needs to be run first.
-
-```
-
-```{r}
-low_count<- read_csv(here('analysis/2_experiment_2/low_count.csv'))
-
-# Fill missing nCrittersGame_bin
-low_count_a <- low_count %>%
-  mutate(entropy_bin = as.character(entropy_bin)) %>%
-  filter(is.na(nCrittersGame_bin)) %>%
-  left_join(
-    decode %>% mutate(entropy_bin = as.character(entropy_bin)),
-    by = c("representation_bin", "entropy_bin")
-  ) %>%
-  mutate(nCrittersGame_bin = coalesce(nCrittersGame_bin.x, nCrittersGame_bin.y)) %>%
-  select(-nCrittersGame_bin.x, -nCrittersGame_bin.y) %>%
-  distinct(entropy_bin, representation_bin, .keep_all = TRUE)
-
-
-
-# Fill missing entropy_bin
-low_count_c <- low_count %>%
-  filter(is.na(entropy_bin)) %>%
-  left_join(decode, by = c("nCrittersGame_bin", "representation_bin")) %>%
-  mutate(entropy_bin = coalesce(entropy_bin.x, entropy_bin.y)) %>%
-  select(-entropy_bin.x, -entropy_bin.y)%>% 
-  distinct(nCrittersGame_bin, representation_bin, .keep_all = TRUE)
-
-# Combine filled datasets
-low_count_filled <- bind_rows(low_count_a, low_count_b, low_count_c)
-
-# Remove duplicate entries by selecting the first match for each row in low_count
-low_count_filled <- low_count_filled %>%
-  
-  distinct(designatedGame, .keep_all = TRUE)%>% 
-  select(-treatment, -representation_bin, -count, -prop,-direction, -entropy_bin, everything(), treatment, representation_bin, count, prop,direction, entropy_bin) %>%
-  arrange(treatment)
-
-write_json(low_count_filled, "missing_games_jan17.json", pretty = TRUE)
-```
-
-\
-
-```{r}
-decode_combined_with_direction <- decode_combined_with_direction %>%
-  select(-treatment, -representation_bin, everything(), treatment, representation_bin) %>%
-  arrange(treatment, direction)
-
-missing_rows <- setdiff(decode_combined[, !names(decode_combined) %in% "direction"], decode_combined_with_direction[, !names(decode_combined_with_direction) %in% "direction"])
-
-```
-
-```{r}
-decode_with_count<-merge(decode, low_count[, c("treatment", "representation_bin")], by = c("treatment", "representation_bin"), all.x = TRUE)%>% 
-distinct()
-
-
-decode_combined_with_count <- decode_combined_with_count %>%
-  select(-treatment, -representation_bin, everything(), treatment, representation_bin) %>%
-  arrange(treatment)
-
-
-```
-
-```{r}
-write_json(decode_combined_with_direction, "missing_games_jan9_3.json", pretty = TRUE)
-```
-
-# Rewarding players
-
-```{r}
-reward <- d.all %>% 
-  filter(!gameID %in% gameIDs_to_remove) %>% 
-  filter(idx == 8) %>% 
-  select(-stageName, -treatmentName.x, -roundID, -emojiArray, -confidence, -ended.x, 
-         -stageID.x, -exitSurvey, -treatment.x, -chat, -messages, -recipient, 
-         -designatedGame, -playerID, -participantID, -num_players, -prob, -entropy, 
-         -representation, -entropy_bin, -representation_bin, -nCrittersGame_bin, 
-         -idx, -mleEstimate) %>%
-  group_by(gameID) %>%
-  mutate(groupGuess = mean(guess))%>%
-  mutate(mleGame = mleGame*100) %>%
-  mutate(groupError = abs(mleGame-groupGuess))%>%
-  filter(groupError < 5) %>%
- unique() %>%
-  select(-nRabbits, -nSquirrels, -nCritters, -nSquirrelsGame, -nCrittersGame, -nRabbitsGame) %>%
-  ungroup() %>%
-  mutate(answerVariance = abs(groupGuess - guess))%>%
-  filter(answerVariance < 6) %>%
-  group_by(gameID)%>%
-  mutate(nPlayers = n())%>%
-  ungroup()%>%
-  filter(nPlayers >3)
-```
-
-# 
