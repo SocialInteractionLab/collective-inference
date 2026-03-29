@@ -722,7 +722,7 @@ Messages could receive compound codes if they contained multiple types (e.g., "p
 #| message: false
 
 # Load coded message data
-d.messages <- read_csv(here('analysis/exp2/message_data/coded.csv'))
+d.messages <- read_csv(here('data/exp2/coded_messages.csv'))
 
 cat("=== MESSAGE DATA ===\n")
 cat("Total messages:", nrow(d.messages), "\n")
