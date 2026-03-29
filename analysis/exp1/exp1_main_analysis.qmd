@@ -393,7 +393,7 @@ p_adaptive <- ggplot(d.summary,
   )
 
 # Save figure
-ggsave(here("figures/exp1_adaptive_weighting.pdf"), p_adaptive,
+ggsave(here("figures/fig3.pdf"), p_adaptive,
        width = 10, height = 6)
 
 p_adaptive
@@ -468,7 +468,7 @@ p_stability <- d.stabilization %>%
 combined_fig <- p_error + p_stability
 
 # Save combined figure
-ggsave(here("figures/exp1_fig2.pdf"), combined_fig, width = 12, height = 5)
+ggsave(here("figures/fig2.pdf"), combined_fig, width = 12, height = 5)
 
 combined_fig
 

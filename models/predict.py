@@ -19,7 +19,7 @@ For each Exp2 game:
 
 Output
 ------
-- figures/model_fig5.pdf: Predicted error across difficulty axes
+- figures/fig7.pdf: Predicted error across difficulty axes
 - Console: Means and effects by representativeness
 
 Usage
@@ -340,6 +340,6 @@ ax.set_ylim(0, None)
 ax.legend(loc='upper right', frameon=False)
 
 plt.tight_layout()
-plt.savefig('../figures/fig6.pdf', bbox_inches='tight')
-plt.savefig('../figures/fig6.png', bbox_inches='tight', dpi=300)
-print("Saved to figures/fig6.pdf")
+plt.savefig('../figures/fig7.pdf', bbox_inches='tight')
+plt.savefig('../figures/fig7.png', bbox_inches='tight', dpi=300)
+print("Saved to figures/fig7.pdf")
