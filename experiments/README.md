@@ -1,24 +1,17 @@
-# Conditions:
+# Experiment code
 
-All expeirments share the same codebase and are run with different `treatment` parameters in the Empirica interface.
+All experiments share the same [Empirica](https://empirica.ly/) codebase and are run with different `treatment` parameters.
 
-## Experiment 1
+## Experiment 1: Communication channel
 
-Our first experiment used a `unidirectional` message channel and had two conditions:
-
-```
-experiment1-0.7
-experiment1-0.3
-```
-
-corresponding to different ground-truth probabilities.
-
-## Experiment 2
-
-Our second experiment manipulated the message channel:
+Three communication conditions, each with two ground-truth probabilities (0.3 and 0.7):
 
 ```
-experiment2-slider
-experiment2-chat
+slider-0.3 / slider-0.7
+unidirectional-0.3 / unidirectional-0.7
+interactive-0.3 / interactive-0.7
 ```
 
+## Experiment 2: Epistemic difficulty
+
+Interactive chat and slider conditions, with pre-generated game configurations varying total sample size, representativeness, and information distribution. Game configurations are loaded from JSON files in `server/src/`.
