@@ -14,4 +14,11 @@ interactive-0.3 / interactive-0.7
 
 ## Experiment 2: Epistemic difficulty
 
-Interactive chat and slider conditions, with pre-generated game configurations varying total sample size, representativeness, and information distribution. Game configurations are loaded from JSON files in `server/src/`.
+Interactive chat and slider conditions, crossed with slider direction counterbalancing (RS = Rabbits→Squirrels, SR = Squirrels→Rabbits):
+
+```
+RS_interactive / RS_slider
+SR_interactive / SR_slider
+```
+
+Pre-generated game configurations vary total sample size, representativeness, and information distribution. Game configurations are loaded from JSON files in `server/src/`.
